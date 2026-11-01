@@ -969,8 +969,8 @@ mod tests {
         ParsedMarkdownMermaidDiagramContents, extract_mermaid_diagrams, parse_mermaid_info,
     };
     use crate::{
-        CodeBlockRenderer, CopyButtonVisibility, MERMAID_ZOOM_DEBOUNCE, Markdown, MarkdownElement,
-        MarkdownOptions, MarkdownStyle, WrapButtonVisibility,
+        AutoscrollAlignment, CodeBlockRenderer, CopyButtonVisibility, MERMAID_ZOOM_DEBOUNCE, Markdown,
+        MarkdownElement, MarkdownOptions, MarkdownStyle, WrapButtonVisibility,
     };
     use collections::HashMap;
     use gpui::{
@@ -1898,7 +1898,10 @@ mod tests {
         markdown.read_with(cx, |markdown, _| {
             assert!(!markdown.is_parsing());
             assert!(markdown.has_pending_render());
-            assert_eq!(markdown.autoscroll_request, Some(source_index));
+            assert_eq!(
+                markdown.autoscroll_request,
+                Some((source_index, AutoscrollAlignment::IntoView))
+            );
         });
 
         let render_image = cx.update(|_, cx| {

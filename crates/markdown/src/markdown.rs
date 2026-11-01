@@ -496,9 +496,9 @@ pub struct Markdown {
     selection: Selection,
     pressed_link: Option<RenderedLink>,
     pressed_footnote_ref: Option<RenderedFootnoteRef>,
-    autoscroll_request: Option<usize>,
+    autoscroll_request: Option<(usize, AutoscrollAlignment)>,
     pending_heading_scroll: Option<SharedString>,
-    pending_autoscroll: Option<usize>,
+    pending_autoscroll: Option<(usize, AutoscrollAlignment)>,
     active_root_block: Option<usize>,
     parsed_markdown: ParsedMarkdown,
     images_by_source_offset: HashMap<usize, Arc<Image>>,
@@ -987,7 +987,7 @@ impl Markdown {
 
     pub fn scroll_to_heading(&mut self, slug: &str, cx: &mut Context<Self>) -> Option<usize> {
         if let Some(source_index) = self.parsed_markdown.heading_slugs.get(slug).copied() {
-            self.autoscroll_request = Some(source_index);
+            self.autoscroll_request = Some((source_index, AutoscrollAlignment::IntoView));
             cx.notify();
             Some(source_index)
         } else {
@@ -1038,10 +1038,33 @@ impl Markdown {
         source_index: usize,
         cx: &mut Context<Self>,
     ) {
+        self.request_autoscroll(source_index, AutoscrollAlignment::IntoView, cx);
+    }
+
+    /// Request that the given source index be scrolled to the top of the viewport.
+    ///
+    /// Unlike [`Self::request_autoscroll_to_source_index`], which only scrolls the minimum
+    /// amount to bring the target into view, this aligns the target line with the top edge
+    /// of the viewport. Used by the table of contents so that a clicked heading always lands
+    /// at a predictable position regardless of where it currently sits.
+    pub fn request_scroll_to_top_of_source_index(
+        &mut self,
+        source_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_autoscroll(source_index, AutoscrollAlignment::Top, cx);
+    }
+
+    fn request_autoscroll(
+        &mut self,
+        source_index: usize,
+        alignment: AutoscrollAlignment,
+        cx: &mut Context<Self>,
+    ) {
         if self.pending_parse.is_some() || self.options.defer_parsing {
-            self.pending_autoscroll = Some(source_index);
+            self.pending_autoscroll = Some((source_index, alignment));
         } else {
-            self.autoscroll_request = Some(source_index);
+            self.autoscroll_request = Some((source_index, alignment));
         }
         cx.refresh_windows();
     }
@@ -1074,8 +1097,8 @@ impl Markdown {
                 if let Some(slug) = self.pending_heading_scroll.take() {
                     self.pending_autoscroll = None;
                     self.scroll_to_heading(&slug, cx);
-                } else if let Some(source_index) = self.pending_autoscroll.take() {
-                    self.autoscroll_request = Some(source_index);
+                } else if let Some(autoscroll) = self.pending_autoscroll.take() {
+                    self.autoscroll_request = Some(autoscroll);
                     cx.refresh_windows();
                 }
             }
@@ -1449,9 +1472,9 @@ impl Markdown {
                         this.parsed_markdown.heading_slugs.get(&slug).copied()
                 {
                     this.pending_autoscroll = None;
-                    this.autoscroll_request = Some(source_index);
-                } else if let Some(source_index) = this.pending_autoscroll.take() {
-                    this.autoscroll_request = Some(source_index);
+                    this.autoscroll_request = Some((source_index, AutoscrollAlignment::IntoView));
+                } else if let Some(autoscroll) = this.pending_autoscroll.take() {
+                    this.autoscroll_request = Some(autoscroll);
                 }
                 cx.notify();
                 cx.refresh_windows();
@@ -1778,6 +1801,16 @@ fn highlight_code_block(block: PendingCodeBlock, code_block_highlights: &mut Cod
             );
         }
     }
+}
+
+/// How a requested autoscroll aligns the target line within the viewport.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AutoscrollAlignment {
+    /// Scroll the minimum amount needed to bring the target into view.
+    #[default]
+    IntoView,
+    /// Align the target line to the top edge of the viewport.
+    Top,
 }
 
 pub enum AutoscrollBehavior {
@@ -2493,7 +2526,8 @@ impl MarkdownElement {
                     };
                     markdown.selection.set_head(source_index, &rendered_text);
                     markdown.autoscroll_code_block(source_index, event.position);
-                    markdown.autoscroll_request = Some(source_index);
+                    markdown.autoscroll_request =
+                        Some((source_index, AutoscrollAlignment::IntoView));
                     cx.notify();
                 } else {
                     let is_hitbox_hovered = hitbox.is_hovered(window);
@@ -2539,7 +2573,8 @@ impl MarkdownElement {
                         if let Some(source_index) =
                             markdown.footnote_definition_content_start(&pressed_footnote_ref.label)
                         {
-                            markdown.autoscroll_request = Some(source_index);
+                            markdown.autoscroll_request =
+                                Some((source_index, AutoscrollAlignment::IntoView));
                             cx.notify();
                         }
                     } else if let Some(pressed_link) = markdown.pressed_link.take()
@@ -2572,36 +2607,47 @@ impl MarkdownElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<()> {
-        let autoscroll_index = self.markdown.update(cx, |markdown, _| {
-            let source_index = markdown.autoscroll_request?;
+        let (autoscroll_index, alignment) = self.markdown.update(cx, |markdown, _| {
+            let (source_index, alignment) = markdown.autoscroll_request?;
             if markdown.has_pending_render() {
                 return None;
             }
             markdown.autoscroll_request = None;
-            Some(source_index)
+            Some((source_index, alignment))
         })?;
         let (position, line_height) = rendered_text.position_for_source_index(autoscroll_index)?;
 
         match &self.autoscroll {
             AutoscrollBehavior::Controlled(scroll_handle) => {
                 let viewport = scroll_handle.bounds();
-                let margin = line_height * 3.;
-                let top_goal = viewport.top() + margin;
-                let bottom_goal = viewport.bottom() - margin;
                 let current_offset = scroll_handle.offset();
 
-                let new_offset_y = if position.y < top_goal {
-                    current_offset.y + (top_goal - position.y)
-                } else if position.y + line_height > bottom_goal {
-                    current_offset.y + (bottom_goal - (position.y + line_height))
-                } else {
-                    current_offset.y
-                };
+                let target_offset_y = match alignment {
+                    AutoscrollAlignment::Top => current_offset.y + (viewport.top() - position.y),
+                    AutoscrollAlignment::IntoView => {
+                        let margin = line_height * 3.;
+                        let top_goal = viewport.top() + margin;
+                        let bottom_goal = viewport.bottom() - margin;
 
-                scroll_handle.set_offset(point(
+                        if position.y < top_goal {
+                            current_offset.y + (top_goal - position.y)
+                        } else if position.y + line_height > bottom_goal {
+                            current_offset.y + (bottom_goal - (position.y + line_height))
+                        } else {
+                            current_offset.y
+                        }
+                    }
+                };
+                let target_offset = point(
                     current_offset.x,
-                    new_offset_y.clamp(-scroll_handle.max_offset().y, Pixels::ZERO),
-                ));
+                    target_offset_y.clamp(-scroll_handle.max_offset().y, Pixels::ZERO),
+                );
+
+                if alignment == AutoscrollAlignment::Top {
+                    Self::animate_scroll_to(scroll_handle, target_offset, self.markdown.clone(), cx);
+                } else {
+                    scroll_handle.set_offset(target_offset);
+                }
             }
             AutoscrollBehavior::Propagate => {
                 let text_style = self.style.base_text_style.clone();
@@ -2615,6 +2661,36 @@ impl MarkdownElement {
             }
         }
         Some(())
+    }
+
+    /// Smoothly animate the scroll offset from its current value to `target`, so that
+    /// heading navigation glides to its destination instead of jumping.
+    fn animate_scroll_to(
+        scroll_handle: &ScrollHandle,
+        target: Point<Pixels>,
+        markdown: Entity<Markdown>,
+        cx: &mut App,
+    ) {
+        let scroll_handle = scroll_handle.clone();
+        let start = scroll_handle.offset();
+        const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+        const STEP_COUNT: u32 = 14;
+
+        cx.spawn(async move |cx| {
+            for step in 0..=STEP_COUNT {
+                let progress = step as f32 / STEP_COUNT as f32;
+                // ease-out cubic: fast at the start, decelerating into the target.
+                let eased = 1.0 - (1.0 - progress).powi(3);
+                let offset_y = start.y + (target.y - start.y) * eased;
+                scroll_handle.set_offset(point(start.x, offset_y));
+                markdown.update(cx, |_, cx| cx.notify());
+
+                if step < STEP_COUNT {
+                    cx.background_executor().timer(FRAME_INTERVAL).await;
+                }
+            }
+        })
+        .detach();
     }
 
     fn on_mouse_event<T: MouseEvent>(
@@ -5329,7 +5405,7 @@ mod tests {
                 assert!(markdown.options.defer_parsing);
                 assert!(!markdown.has_pending_render());
                 assert!(markdown.parsed_markdown.events.is_empty());
-                assert_eq!(markdown.pending_autoscroll, Some(9));
+                assert_eq!(markdown.pending_autoscroll, Some((9, AutoscrollAlignment::IntoView)));
                 assert_eq!(markdown.autoscroll_request, None);
             });
 
@@ -5362,7 +5438,7 @@ mod tests {
                     vec![0..7, 9..14]
                 );
                 assert_eq!(markdown.pending_autoscroll, None);
-                assert_eq!(markdown.autoscroll_request, Some(9));
+                assert_eq!(markdown.autoscroll_request, Some((9, AutoscrollAlignment::IntoView)));
                 markdown.ensure_parsed(cx);
                 assert!(!markdown.has_pending_render());
             });

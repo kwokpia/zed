@@ -1099,11 +1099,19 @@ impl MarkdownPreviewView {
     }
 
     fn navigate_to_heading(&mut self, source_offset: usize, cx: &mut Context<Self>) {
-        self.sync_preview_to_source_index(source_offset, true, cx);
+        self.active_source_index = Some(source_offset);
+        self.sync_active_root_block(cx);
+        self.markdown.update(cx, |markdown, cx| {
+            markdown.request_scroll_to_top_of_source_index(source_offset, cx);
+        });
         cx.notify();
     }
 
-    fn render_table_of_contents(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_table_of_contents(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let headings = self.markdown.read(cx).headings().to_vec();
         if headings.is_empty() {
             return None;
@@ -1122,6 +1130,10 @@ impl MarkdownPreviewView {
             .v_flex()
             .items_end()
             .gap_1()
+            // Block the document scroll container behind this overlay from receiving
+            // scroll events, so wheel scrolling over the outline never scrolls the
+            // document underneath it.
+            .occlude()
             .on_hover(cx.listener(|this, hovered, _window, cx| {
                 if this.toc_hovered != *hovered {
                     this.toc_hovered = *hovered;
@@ -1134,6 +1146,7 @@ impl MarkdownPreviewView {
             container = container.child(self.render_table_of_contents_panel(
                 &headings,
                 active_heading_index,
+                window,
                 cx,
             ));
         }
@@ -1145,6 +1158,7 @@ impl MarkdownPreviewView {
         &mut self,
         headings: &[MarkdownHeading],
         active_heading_index: Option<usize>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = cx.theme().colors();
@@ -1153,11 +1167,16 @@ impl MarkdownPreviewView {
         let active_bar_color = colors.text;
         let inactive_bar_color = colors.text_muted;
 
+        // Leave room for the indicator button, the top/bottom margins, and the panel's
+        // own padding so the panel can grow nearly as tall as the viewport and avoid
+        // needing its own scrollbar for typical documents.
+        let max_height = window.viewport_size().height - px(72.);
+
         let mut panel = div()
             .id("markdown-preview-toc-panel")
             .debug_selector(|| "markdown-preview-toc-panel".into())
             .w_72()
-            .max_h_96()
+            .max_h(max_height)
             .overflow_y_scroll()
             .elevation_2(cx)
             .p_1()
@@ -2053,7 +2072,7 @@ impl Render for MarkdownPreviewView {
             .unwrap_or_else(|| cx.theme().colors().editor_background);
         let preview_font_size = ThemeSettings::get_global(cx).markdown_preview_font_size(cx);
         let hovered_url = self.hovered_url.clone();
-        let table_of_contents = self.render_table_of_contents(cx);
+        let table_of_contents = self.render_table_of_contents(window, cx);
         div()
             .image_cache(self.image_cache.clone())
             .id("MarkdownPreview")
