@@ -32,8 +32,8 @@ use theme::{SystemAppearance, Theme, ThemeRegistry};
 use theme_settings::ThemeSettings;
 use ui::utils::WithRemSize;
 use ui::{
-    ContextMenu, IconButtonShape, LinkPreview, ScrollAxes, Scrollbars, Tooltip, WithScrollbar,
-    prelude::*, right_click_menu,
+    ContextMenu, IconButtonShape, LinkPreview, ScrollAxes, Scrollbars, WithScrollbar, prelude::*,
+    right_click_menu,
 };
 use util::{
     ResultExt,
@@ -83,7 +83,7 @@ pub struct MarkdownPreviewView {
     pending_update_task: Option<Task<Result<()>>>,
     hovered_url: Option<SharedString>,
     mode: MarkdownPreviewMode,
-    show_toc: bool,
+    toc_hovered: bool,
     /// Search results depend on the parsed markdown, which lags behind the source while a
     /// background parse is in flight. Tracked so matches can be invalidated once it lands.
     markdown_parse_pending: bool,
@@ -133,6 +133,12 @@ pub enum MarkdownPreviewEvent {
 enum PreviewLinkTarget {
     Heading(SharedString),
     Position { row: u32, column: u32 },
+}
+
+/// The length of the horizontal bar drawn before each outline entry. Level `1`
+/// headings get the longest bar; deeper headings get progressively shorter bars.
+fn heading_outline_bar_width(level: u8) -> Rems {
+    rems((1.0 - f32::from(level.saturating_sub(1)) * 0.16).max(0.25))
 }
 
 impl MarkdownPreviewView {
@@ -429,7 +435,7 @@ impl MarkdownPreviewView {
                 pending_update_task: None,
                 hovered_url: None,
                 mode,
-                show_toc: false,
+                toc_hovered: false,
                 markdown_parse_pending: false,
                 nav_history: None,
             };
@@ -1106,28 +1112,25 @@ impl MarkdownPreviewView {
         let active_heading_index = self.active_heading_index(&headings);
 
         let toggle_button = IconButton::new("markdown-preview-toc-toggle", IconName::ListTree)
-            .shape(IconButtonShape::Square)
-            .toggle_state(self.show_toc)
-            .tooltip(Tooltip::text(if self.show_toc {
-                "Hide Outline"
-            } else {
-                "Show Outline"
-            }))
-            .on_click(cx.listener(|this, _, _window, cx| {
-                this.show_toc = !this.show_toc;
-                cx.notify();
-            }));
+            .shape(IconButtonShape::Square);
 
         let mut container = div()
+            .id("markdown-preview-toc")
             .absolute()
             .top_2()
             .right_2()
             .v_flex()
             .items_end()
             .gap_1()
+            .on_hover(cx.listener(|this, hovered, _window, cx| {
+                if this.toc_hovered != *hovered {
+                    this.toc_hovered = *hovered;
+                    cx.notify();
+                }
+            }))
             .child(toggle_button);
 
-        if self.show_toc {
+        if self.toc_hovered {
             container = container.child(self.render_table_of_contents_panel(
                 &headings,
                 active_heading_index,
@@ -1144,8 +1147,11 @@ impl MarkdownPreviewView {
         active_heading_index: Option<usize>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let element_hover = cx.theme().colors().element_hover;
-        let element_active = cx.theme().colors().element_active;
+        let colors = cx.theme().colors();
+        let element_hover = colors.element_hover;
+        let element_active = colors.element_active;
+        let active_bar_color = colors.text;
+        let inactive_bar_color = colors.text_muted;
 
         let mut panel = div()
             .id("markdown-preview-toc-panel")
@@ -1160,6 +1166,7 @@ impl MarkdownPreviewView {
         for (index, heading) in headings.iter().enumerate() {
             let is_active = active_heading_index == Some(index);
             let indent = rems(0.5 + f32::from(heading.level.saturating_sub(1)) * 0.75);
+            let bar_width = heading_outline_bar_width(heading.level);
             let source_offset = heading.source_offset;
             let text = heading.text.clone();
 
@@ -1178,8 +1185,23 @@ impl MarkdownPreviewView {
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.navigate_to_heading(source_offset, cx);
                     }))
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(bar_width)
+                            .h(px(2.))
+                            .rounded_full()
+                            .bg(if is_active {
+                                active_bar_color
+                            } else {
+                                inactive_bar_color
+                            }),
+                    )
                     .child(
                         Label::new(text)
+                            .flex_1()
                             .single_line()
                             .truncate()
                             .color(if is_active {
@@ -2559,7 +2581,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn table_of_contents_toggles_and_navigates(cx: &mut TestAppContext) {
+    async fn table_of_contents_reveals_on_hover_and_navigates(cx: &mut TestAppContext) {
         let (project, _, multi_workspace) = markdown_workspace(
             cx,
             json!({
@@ -2587,8 +2609,12 @@ mod tests {
         // The panel starts hidden.
         assert!(visual_cx.debug_bounds("markdown-preview-toc-panel").is_none());
 
-        // Clicking the outline toggle reveals the panel with one entry per heading.
-        click_tab_menu_target(&mut visual_cx, "ICON-ListTree", MouseButton::Left, 1);
+        // Hovering the outline indicator reveals the panel with one entry per heading.
+        let toggle_bounds = visual_cx
+            .debug_bounds("ICON-ListTree")
+            .expect("outline toggle button");
+        visual_cx.simulate_mouse_move(toggle_bounds.center(), None, Modifiers::default());
+        visual_cx.run_until_parked();
         assert!(visual_cx.debug_bounds("markdown-preview-toc-panel").is_some());
         assert!(visual_cx.debug_bounds("markdown-preview-toc-entry-2").is_some());
 
@@ -2599,6 +2625,11 @@ mod tests {
             preview.read_with(cx, |preview, _| preview.active_source_index),
             Some(headings[1].source_offset)
         );
+
+        // Moving the pointer away hides the panel again.
+        visual_cx.simulate_mouse_move(gpui::point(px(0.0), px(0.0)), None, Modifiers::default());
+        visual_cx.run_until_parked();
+        assert!(visual_cx.debug_bounds("markdown-preview-toc-panel").is_none());
     }
 
     #[gpui::test]
