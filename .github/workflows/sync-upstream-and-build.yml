@@ -1,0 +1,73 @@
+name: sync-upstream-and-build
+
+# Keeps the fork's `main` in sync with `zed-industries/zed` (preserving local
+# commits, e.g. the markdown TOC work) and type-checks the merged result so
+# upstream changes that break the build are caught early.
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_ahead: ${{ steps.detect.outputs.upstream_ahead }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/zed-industries/zed.git
+          git fetch upstream main
+
+      - name: Detect upstream changes
+        id: detect
+        run: |
+          ahead="$(git rev-list --count HEAD..upstream/main)"
+          echo "upstream_ahead=${ahead}" >> "$GITHUB_OUTPUT"
+
+      - name: Merge upstream into main
+        if: steps.detect.outputs.upstream_ahead != '0'
+        run: |
+          git merge upstream/main --no-edit
+          git push origin main
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.upstream_ahead != '0' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install Linux dependencies
+        run: ./script/linux
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.98.1'
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (type-check)
+        run: cargo check
+        timeout-minutes: 180
