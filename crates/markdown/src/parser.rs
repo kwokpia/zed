@@ -39,6 +39,7 @@ pub(crate) struct ParsedMarkdownData {
     pub html_blocks: BTreeMap<usize, html::html_parser::ParsedHtmlBlock>,
     pub metadata_blocks: BTreeMap<usize, ParsedMetadataBlock>,
     pub heading_slugs: HashMap<SharedString, usize>,
+    pub headings: Vec<MarkdownHeading>,
     pub footnote_definitions: HashMap<SharedString, usize>,
     /// Source spans of link reference definitions (`[id]: https://example.com`), which are
     /// consumed by the parser and never appear in any event range.
@@ -101,20 +102,47 @@ impl ParseState {
 
 const MAX_DUPLICATE_HEADING_SLUGS: usize = 128;
 
-fn build_heading_slugs(
+/// A single heading extracted from a Markdown document, in document order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkdownHeading {
+    /// 1-based heading level (`1` for `#`, `2` for `##`, and so on).
+    pub level: u8,
+    /// The heading's plain-text contents, with inline markup removed.
+    pub text: SharedString,
+    /// The slug used to reference this heading from `#fragment` links.
+    pub slug: SharedString,
+    /// Offset into the source Markdown where the heading's text begins.
+    pub source_offset: usize,
+}
+
+fn heading_level_value(level: HeadingLevel) -> u8 {
+    match level {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
+    }
+}
+
+fn build_headings(
     source: &str,
     events: &[(Range<usize>, MarkdownEvent)],
-) -> HashMap<SharedString, usize> {
+) -> (HashMap<SharedString, usize>, Vec<MarkdownHeading>) {
     let mut slugs = HashMap::default();
+    let mut headings = Vec::new();
     let mut slug_counts: HashMap<String, usize> = HashMap::default();
     let mut inside_heading = false;
+    let mut heading_level = 0;
     let mut heading_text = String::new();
     let mut heading_source_start: Option<usize> = None;
 
     for (range, event) in events {
         match event {
-            MarkdownEvent::Start(MarkdownTag::Heading { .. }) => {
+            MarkdownEvent::Start(MarkdownTag::Heading { level, .. }) => {
                 inside_heading = true;
+                heading_level = heading_level_value(*level);
                 heading_text.clear();
                 heading_source_start = None;
             }
@@ -142,7 +170,13 @@ fn build_heading_slugs(
                         *count += 1;
                     }
                     if !slug.is_empty() {
-                        slugs.insert(SharedString::from(slug), source_offset);
+                        slugs.insert(SharedString::from(slug.clone()), source_offset);
+                        headings.push(MarkdownHeading {
+                            level: heading_level,
+                            text: SharedString::from(heading_text.clone()),
+                            slug: SharedString::from(slug),
+                            source_offset,
+                        });
                     }
                     inside_heading = false;
                 }
@@ -169,7 +203,7 @@ fn build_heading_slugs(
         }
     }
 
-    slugs
+    (slugs, headings)
 }
 
 fn parse_metadata_table_rows(source: &str, source_range: Range<usize>) -> Option<Vec<MetadataRow>> {
@@ -735,10 +769,10 @@ pub(crate) fn parse_markdown_with_options(
         }
     }
 
-    let heading_slugs = if parse_heading_slugs {
-        build_heading_slugs(text, &state.events)
+    let (heading_slugs, headings) = if parse_heading_slugs {
+        build_headings(text, &state.events)
     } else {
-        HashMap::default()
+        (HashMap::default(), Vec::new())
     };
     let footnote_definitions = build_footnote_definitions(&state.events);
 
@@ -750,6 +784,7 @@ pub(crate) fn parse_markdown_with_options(
         html_blocks,
         metadata_blocks,
         heading_slugs,
+        headings,
         footnote_definitions,
         link_definition_spans,
         has_untagged_code_block,
@@ -1966,6 +2001,42 @@ mod tests {
         assert!(parsed.heading_slugs.contains_key("foo"));
         assert!(parsed.heading_slugs.contains_key("foo-1"));
         assert!(parsed.heading_slugs.contains_key("foo-1-1"));
+    }
+
+    #[test]
+    fn test_headings_are_extracted_in_document_order() {
+        let source = "# Hello World\n\n## Code `block`\n\n### Third Level\n";
+        let parsed = parse_markdown_with_options(source, false, true, false);
+
+        assert_eq!(
+            parsed.headings,
+            vec![
+                MarkdownHeading {
+                    level: 1,
+                    text: SharedString::from("Hello World"),
+                    slug: SharedString::from("hello-world"),
+                    source_offset: source.find("Hello World").expect("first heading text"),
+                },
+                MarkdownHeading {
+                    level: 2,
+                    text: SharedString::from("Code block"),
+                    slug: SharedString::from("code-block"),
+                    source_offset: source.find("Code").expect("second heading text"),
+                },
+                MarkdownHeading {
+                    level: 3,
+                    text: SharedString::from("Third Level"),
+                    slug: SharedString::from("third-level"),
+                    source_offset: source.find("Third Level").expect("third heading text"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_headings_are_empty_without_heading_slugs_enabled() {
+        let parsed = parse_markdown_with_options("# Hello", false, false, false);
+        assert!(parsed.headings.is_empty());
     }
 
     #[test]

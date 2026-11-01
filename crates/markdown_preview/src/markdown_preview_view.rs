@@ -23,7 +23,7 @@ use gpui::{
 use language::{Buffer, LanguageRegistry};
 use markdown::{
     CodeBlockRenderer, CopyButtonVisibility, Markdown, MarkdownElement, MarkdownFont,
-    MarkdownOptions, MarkdownStyle,
+    MarkdownHeading, MarkdownOptions, MarkdownStyle,
 };
 use project::search::SearchQuery;
 use project::{Project, ProjectPath, image_store};
@@ -32,7 +32,8 @@ use theme::{SystemAppearance, Theme, ThemeRegistry};
 use theme_settings::ThemeSettings;
 use ui::utils::WithRemSize;
 use ui::{
-    ContextMenu, LinkPreview, ScrollAxes, Scrollbars, WithScrollbar, prelude::*, right_click_menu,
+    ContextMenu, IconButtonShape, LinkPreview, ScrollAxes, Scrollbars, Tooltip, WithScrollbar,
+    prelude::*, right_click_menu,
 };
 use util::{
     ResultExt,
@@ -82,6 +83,7 @@ pub struct MarkdownPreviewView {
     pending_update_task: Option<Task<Result<()>>>,
     hovered_url: Option<SharedString>,
     mode: MarkdownPreviewMode,
+    show_toc: bool,
     /// Search results depend on the parsed markdown, which lags behind the source while a
     /// background parse is in flight. Tracked so matches can be invalidated once it lands.
     markdown_parse_pending: bool,
@@ -427,6 +429,7 @@ impl MarkdownPreviewView {
                 pending_update_task: None,
                 hovered_url: None,
                 mode,
+                show_toc: false,
                 markdown_parse_pending: false,
                 nav_history: None,
             };
@@ -1078,6 +1081,117 @@ impl MarkdownPreviewView {
         let theme_selection = theme_settings.markdown_preview_theme.as_ref()?;
         let theme_name = theme_selection.name(SystemAppearance::global(cx).0);
         ThemeRegistry::global(cx).get(&theme_name.0).ok()
+    }
+
+    /// The index of the heading that currently contains the preview's active
+    /// source position (the editor cursor), used to highlight the outline entry.
+    fn active_heading_index(&self, headings: &[MarkdownHeading]) -> Option<usize> {
+        let source_index = self.active_source_index?;
+        headings
+            .iter()
+            .rposition(|heading| heading.source_offset <= source_index)
+    }
+
+    fn navigate_to_heading(&mut self, source_offset: usize, cx: &mut Context<Self>) {
+        self.sync_preview_to_source_index(source_offset, true, cx);
+        cx.notify();
+    }
+
+    fn render_table_of_contents(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let headings = self.markdown.read(cx).headings().to_vec();
+        if headings.is_empty() {
+            return None;
+        }
+
+        let active_heading_index = self.active_heading_index(&headings);
+
+        let toggle_button = IconButton::new("markdown-preview-toc-toggle", IconName::ListTree)
+            .shape(IconButtonShape::Square)
+            .toggle_state(self.show_toc)
+            .tooltip(Tooltip::text(if self.show_toc {
+                "Hide Outline"
+            } else {
+                "Show Outline"
+            }))
+            .on_click(cx.listener(|this, _, _window, cx| {
+                this.show_toc = !this.show_toc;
+                cx.notify();
+            }));
+
+        let mut container = div()
+            .absolute()
+            .top_2()
+            .right_2()
+            .v_flex()
+            .items_end()
+            .gap_1()
+            .child(toggle_button);
+
+        if self.show_toc {
+            container = container.child(self.render_table_of_contents_panel(
+                &headings,
+                active_heading_index,
+                cx,
+            ));
+        }
+
+        Some(container.into_any_element())
+    }
+
+    fn render_table_of_contents_panel(
+        &mut self,
+        headings: &[MarkdownHeading],
+        active_heading_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let element_hover = cx.theme().colors().element_hover;
+        let element_active = cx.theme().colors().element_active;
+
+        let mut panel = div()
+            .id("markdown-preview-toc-panel")
+            .debug_selector(|| "markdown-preview-toc-panel".into())
+            .w_72()
+            .max_h_96()
+            .overflow_y_scroll()
+            .elevation_2(cx)
+            .p_1()
+            .v_flex();
+
+        for (index, heading) in headings.iter().enumerate() {
+            let is_active = active_heading_index == Some(index);
+            let indent = rems(0.5 + f32::from(heading.level.saturating_sub(1)) * 0.75);
+            let source_offset = heading.source_offset;
+            let text = heading.text.clone();
+
+            panel = panel.child(
+                div()
+                    .id(("markdown-preview-toc-entry", index))
+                    .debug_selector(move || format!("markdown-preview-toc-entry-{index}"))
+                    .w_full()
+                    .pl(indent)
+                    .pr_2()
+                    .py_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .when(is_active, |this| this.bg(element_active))
+                    .hover(|style| style.bg(element_hover))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.navigate_to_heading(source_offset, cx);
+                    }))
+                    .child(
+                        Label::new(text)
+                            .single_line()
+                            .truncate()
+                            .color(if is_active {
+                                Color::Default
+                            } else {
+                                Color::Muted
+                            }),
+                    ),
+            );
+        }
+
+        panel.into_any_element()
     }
 
     fn render_markdown_element(
@@ -1917,6 +2031,7 @@ impl Render for MarkdownPreviewView {
             .unwrap_or_else(|| cx.theme().colors().editor_background);
         let preview_font_size = ThemeSettings::get_global(cx).markdown_preview_font_size(cx);
         let hovered_url = self.hovered_url.clone();
+        let table_of_contents = self.render_table_of_contents(cx);
         div()
             .image_cache(self.image_cache.clone())
             .id("MarkdownPreview")
@@ -2037,6 +2152,9 @@ impl Render for MarkdownPreviewView {
                         .overflow_hidden()
                         .child(LinkPreview::new(hovered_url.as_ref(), cx)),
                 )
+            })
+            .when_some(table_of_contents, |this, table_of_contents| {
+                this.child(table_of_contents)
             })
     }
 }
@@ -2437,6 +2555,49 @@ mod tests {
         assert_eq!(
             preview.read_with(cx, |preview, cx| preview.tab_tooltip_text(cx)),
             source_tooltip
+        );
+    }
+
+    #[gpui::test]
+    async fn table_of_contents_toggles_and_navigates(cx: &mut TestAppContext) {
+        let (project, _, multi_workspace) = markdown_workspace(
+            cx,
+            json!({
+                "guide.md": "# Intro\n\n## Setup\n\n### Details\n"
+            }),
+            false,
+        )
+        .await;
+        open_project_file(cx, &project, &multi_workspace, "guide.md", None, true).await;
+        let preview = open_preview_for_active_editor(cx, &multi_workspace);
+        cx.run_until_parked();
+
+        let headings = preview.read_with(cx, |preview, cx| {
+            preview.markdown.read(cx).headings().to_vec()
+        });
+        assert_eq!(
+            headings
+                .iter()
+                .map(|heading| (heading.level, heading.text.to_string()))
+                .collect::<Vec<_>>(),
+            [(1, "Intro".into()), (2, "Setup".into()), (3, "Details".into())]
+        );
+
+        let mut visual_cx = VisualTestContext::from_window(multi_workspace.into(), cx);
+        // The panel starts hidden.
+        assert!(visual_cx.debug_bounds("markdown-preview-toc-panel").is_none());
+
+        // Clicking the outline toggle reveals the panel with one entry per heading.
+        click_tab_menu_target(&mut visual_cx, "ICON-ListTree", MouseButton::Left, 1);
+        assert!(visual_cx.debug_bounds("markdown-preview-toc-panel").is_some());
+        assert!(visual_cx.debug_bounds("markdown-preview-toc-entry-2").is_some());
+
+        // Clicking an entry scrolls the preview to that heading's source position.
+        click_tab_menu_target(&mut visual_cx, "markdown-preview-toc-entry-1", MouseButton::Left, 1);
+
+        assert_eq!(
+            preview.read_with(cx, |preview, _| preview.active_source_index),
+            Some(headings[1].source_offset)
         );
     }
 

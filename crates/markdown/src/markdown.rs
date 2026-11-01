@@ -15,6 +15,7 @@ use mermaid::{
     MermaidState, ParsedMarkdownMermaidDiagram, extract_mermaid_diagrams, render_mermaid_diagram,
 };
 pub use path_range::{LineCol, PathWithRange};
+pub use parser::MarkdownHeading;
 use settings::Settings as _;
 use smallvec::SmallVec;
 use theme_settings::ThemeSettings;
@@ -994,6 +995,12 @@ impl Markdown {
         }
     }
 
+    /// The document's headings, in source order. Empty until parsing completes
+    /// (or when [`MarkdownOptions::parse_heading_slugs`] is disabled).
+    pub fn headings(&self) -> &[MarkdownHeading] {
+        &self.parsed_markdown.headings
+    }
+
     pub fn source(&self) -> &SharedString {
         &self.source
     }
@@ -1296,6 +1303,7 @@ impl Markdown {
                         metadata_blocks: BTreeMap::default(),
                         mermaid_diagrams: BTreeMap::default(),
                         heading_slugs: HashMap::default(),
+                        headings: Arc::default(),
                         footnote_definitions: HashMap::default(),
                         link_definition_spans: Arc::default(),
                         fallback_code_block_language: None,
@@ -1318,6 +1326,7 @@ impl Markdown {
             let html_blocks = parsed.html_blocks;
             let metadata_blocks = parsed.metadata_blocks;
             let heading_slugs = parsed.heading_slugs;
+            let headings = parsed.headings;
             let footnote_definitions = parsed.footnote_definitions;
             let link_definition_spans = parsed.link_definition_spans;
             let has_untagged_code_block = parsed.has_untagged_code_block;
@@ -1393,6 +1402,7 @@ impl Markdown {
                 metadata_blocks,
                 mermaid_diagrams,
                 heading_slugs,
+                headings: Arc::from(headings),
                 footnote_definitions,
                 link_definition_spans: Arc::from(link_definition_spans),
                 fallback_code_block_language,
@@ -1542,6 +1552,7 @@ pub struct ParsedMarkdown {
     pub(crate) metadata_blocks: BTreeMap<usize, ParsedMetadataBlock>,
     pub(crate) mermaid_diagrams: BTreeMap<usize, ParsedMarkdownMermaidDiagram>,
     pub heading_slugs: HashMap<SharedString, usize>,
+    pub headings: Arc<[MarkdownHeading]>,
     pub footnote_definitions: HashMap<SharedString, usize>,
     pub(crate) link_definition_spans: Arc<[Range<usize>]>,
     pub(crate) fallback_code_block_language: Option<Arc<Language>>,
