@@ -32,8 +32,8 @@ use theme::{SystemAppearance, Theme, ThemeRegistry};
 use theme_settings::ThemeSettings;
 use ui::utils::WithRemSize;
 use ui::{
-    ContextMenu, IconButtonShape, LinkPreview, ScrollAxes, Scrollbars, WithScrollbar, prelude::*,
-    right_click_menu,
+    ContextMenu, IconButtonShape, LinkPreview, ScrollAxes, Scrollbars, Tooltip, WithScrollbar,
+    prelude::*, right_click_menu,
 };
 use util::{
     ResultExt,
@@ -84,6 +84,7 @@ pub struct MarkdownPreviewView {
     hovered_url: Option<SharedString>,
     mode: MarkdownPreviewMode,
     toc_hovered: bool,
+    toc_pinned: bool,
     /// Search results depend on the parsed markdown, which lags behind the source while a
     /// background parse is in flight. Tracked so matches can be invalidated once it lands.
     markdown_parse_pending: bool,
@@ -436,6 +437,7 @@ impl MarkdownPreviewView {
                 hovered_url: None,
                 mode,
                 toc_hovered: false,
+                toc_pinned: false,
                 markdown_parse_pending: false,
                 nav_history: None,
             };
@@ -1126,9 +1128,9 @@ impl MarkdownPreviewView {
             .id("markdown-preview-toc")
             .absolute()
             .top_2()
-            .right_2()
+            .left_2()
             .v_flex()
-            .items_end()
+            .items_start()
             .gap_1()
             // Block the document scroll container behind this overlay from receiving
             // scroll events, so wheel scrolling over the outline never scrolls the
@@ -1142,7 +1144,7 @@ impl MarkdownPreviewView {
             }))
             .child(toggle_button);
 
-        if self.toc_hovered {
+        if self.toc_hovered || self.toc_pinned {
             container = container.child(self.render_table_of_contents_panel(
                 &headings,
                 active_heading_index,
@@ -1181,6 +1183,38 @@ impl MarkdownPreviewView {
             .elevation_2(cx)
             .p_1()
             .v_flex();
+
+        panel = panel.child(
+            div()
+                .id("markdown-preview-toc-header")
+                .w_full()
+                .h_flex()
+                .justify_end()
+                .child(
+                    IconButton::new(
+                        if self.toc_pinned {
+                            "markdown-preview-toc-unpin"
+                        } else {
+                            "markdown-preview-toc-pin"
+                        },
+                        if self.toc_pinned {
+                            IconName::Unpin
+                        } else {
+                            IconName::Pin
+                        },
+                    )
+                    .shape(IconButtonShape::Square)
+                    .tooltip(Tooltip::text(if self.toc_pinned {
+                        "Unpin"
+                    } else {
+                        "Pin"
+                    }))
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.toc_pinned = !this.toc_pinned;
+                        cx.notify();
+                    })),
+                ),
+        );
 
         for (index, heading) in headings.iter().enumerate() {
             let is_active = active_heading_index == Some(index);
