@@ -524,6 +524,11 @@ pub struct Markdown {
     context_menu_selected_markdown: Option<SharedString>,
     search_highlights: Rc<[Range<usize>]>,
     active_search_highlight: Option<usize>,
+    /// The rendered top Y position of each heading, relative to the markdown
+    /// element's own top edge, aligned with [`ParsedMarkdown::headings`] by
+    /// index. Populated during layout and used to resolve the heading visible at
+    /// a given scroll offset.
+    heading_tops: Rc<[Pixels]>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -740,6 +745,7 @@ impl Markdown {
             context_menu_selected_markdown: None,
             search_highlights: Rc::default(),
             active_search_highlight: None,
+            heading_tops: Rc::default(),
         };
         this.parse(cx);
         this
@@ -999,6 +1005,34 @@ impl Markdown {
     /// (or when [`MarkdownOptions::parse_heading_slugs`] is disabled).
     pub fn headings(&self) -> &[MarkdownHeading] {
         &self.parsed_markdown.headings
+    }
+
+    /// The index into [`Self::headings`] of the heading currently visible at the
+    /// top of the viewport, given a scroll offset (negative while scrolled down).
+    ///
+    /// Returns the last heading whose rendered top is at or above the viewport's
+    /// top edge, or the first heading when the viewport is still above every
+    /// heading (i.e. at the very top of the document). Returns `None` while
+    /// heading positions are still unknown (before the first layout) or when
+    /// there are no headings.
+    pub fn heading_index_at_scroll_offset(&self, scroll_offset_y: Pixels) -> Option<usize> {
+        let headings = &self.parsed_markdown.headings;
+        if headings.is_empty() || self.heading_tops.len() != headings.len() {
+            return None;
+        }
+
+        // `scroll_offset_y` is non-positive; scrolling down moves it further into
+        // the negative range. The viewport's top edge therefore sits at
+        // `-scroll_offset_y` in document coordinates, so the visible heading is
+        // the last one whose top has scrolled past (or reached) that edge.
+        // `Pixels::ZERO - scroll_offset_y` (rather than unary negation) avoids a
+        // `-0.0` that would compare greater than `0.0` under `total_cmp`.
+        let viewport_top = Pixels::ZERO - scroll_offset_y;
+        self.heading_tops
+            .iter()
+            .enumerate()
+            .rposition(|(_, top)| *top <= viewport_top)
+            .or(Some(0))
     }
 
     pub fn source(&self) -> &SharedString {
@@ -1864,6 +1898,20 @@ impl MarkdownElement {
             autoscroll: AutoscrollBehavior::Propagate,
             #[cfg(test)]
             on_render: None,
+        }
+    }
+
+    /// Records each heading's rendered top position (relative to the markdown
+    /// element's top edge) so the table of contents can resolve which heading is
+    /// visible at a given scroll offset. Runs after the child text has been laid
+    /// out and prepainted, when positions are known.
+    fn store_heading_tops(&self, rendered_text: &RenderedText, origin_y: Pixels, cx: &mut App) {
+        let headings = self.markdown.read(cx).parsed_markdown.headings.clone();
+        let heading_tops = rendered_text.heading_tops(&headings, origin_y);
+        let changed = self.markdown.read(cx).heading_tops.as_ref() != heading_tops.as_ref();
+        if changed {
+            self.markdown
+                .update(cx, |markdown, _| markdown.heading_tops = heading_tops);
         }
     }
 
@@ -3537,6 +3585,7 @@ impl Element for MarkdownElement {
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         rendered_markdown.element.prepaint(window, cx);
+        self.store_heading_tops(&rendered_markdown.text, bounds.origin.y, cx);
         self.autoscroll(&rendered_markdown.text, window, cx);
         hitbox
     }
@@ -5141,6 +5190,26 @@ impl RenderedText {
         None
     }
 
+    /// The rendered top Y position of each heading, relative to the markdown
+    /// element's own top edge (document coordinates, invariant under scroll),
+    /// aligned with `headings` by index. Headings that resolve to no position
+    /// (e.g. not yet laid out) fall back to the previous heading's top so the
+    /// sequence stays monotonically non-decreasing.
+    fn heading_tops(&self, headings: &[MarkdownHeading], origin_y: Pixels) -> Rc<[Pixels]> {
+        let mut last_top = Pixels::ZERO;
+        headings
+            .iter()
+            .map(|heading| {
+                let top = self
+                    .position_for_source_index(heading.source_offset)
+                    .map(|(position, _)| position.y - origin_y)
+                    .unwrap_or(last_top);
+                last_top = top;
+                top
+            })
+            .collect()
+    }
+
     fn surrounding_word_range(&self, source_index: usize) -> Range<usize> {
         for line in self.lines.iter() {
             if source_index > line.source_end {
@@ -5443,6 +5512,49 @@ mod tests {
                 assert!(!markdown.has_pending_render());
             });
         }
+    }
+
+    #[gpui::test]
+    fn test_heading_index_at_scroll_offset(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let markdown = cx.new(|cx| Markdown::new_deferred("", None, cx));
+        markdown.update(cx, |markdown, _| {
+            markdown.parsed_markdown.headings = vec![
+                MarkdownHeading {
+                    level: 1,
+                    text: "One".into(),
+                    slug: "one".into(),
+                    source_offset: 0,
+                },
+                MarkdownHeading {
+                    level: 2,
+                    text: "Two".into(),
+                    slug: "two".into(),
+                    source_offset: 10,
+                },
+                MarkdownHeading {
+                    level: 3,
+                    text: "Three".into(),
+                    slug: "three".into(),
+                    source_offset: 20,
+                },
+            ]
+            .into();
+            markdown.heading_tops = vec![px(16.), px(100.), px(200.)].into();
+        });
+
+        markdown.read_with(cx, |markdown, _| {
+            // At the very top, before the first heading, the first section is active.
+            assert_eq!(markdown.heading_index_at_scroll_offset(px(0.)), Some(0));
+            // Scrolling down past the second heading makes it visible.
+            assert_eq!(markdown.heading_index_at_scroll_offset(px(-100.)), Some(1));
+            // Between headings, the earlier one still counts as visible.
+            assert_eq!(markdown.heading_index_at_scroll_offset(px(-150.)), Some(1));
+            // Scrolling to the third heading.
+            assert_eq!(markdown.heading_index_at_scroll_offset(px(-200.)), Some(2));
+            // Scrolled past the last heading still resolves to the last heading.
+            assert_eq!(markdown.heading_index_at_scroll_offset(px(-999.)), Some(2));
+        });
     }
 
     #[gpui::test]

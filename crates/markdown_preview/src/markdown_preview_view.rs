@@ -139,7 +139,15 @@ enum PreviewLinkTarget {
 /// The length of the horizontal bar drawn before each outline entry. Level `1`
 /// headings get the longest bar; deeper headings get progressively shorter bars.
 fn heading_outline_bar_width(level: u8) -> Rems {
-    rems((1.0 - f32::from(level.saturating_sub(1)) * 0.16).max(0.25))
+    rems((1.4 - f32::from(level.saturating_sub(1)) * 0.24).max(0.3))
+}
+
+/// The thickness of the horizontal bar drawn before each outline entry. Level `1`
+/// headings get the thickest bar; deeper headings get progressively thinner bars.
+/// Combined with [`heading_outline_bar_width`] this makes the level read clearly
+/// at a glance.
+fn heading_outline_bar_height(level: u8) -> Pixels {
+    px((4.0 - f32::from(level.saturating_sub(1)) * 0.5).max(1.5))
 }
 
 impl MarkdownPreviewView {
@@ -1091,13 +1099,13 @@ impl MarkdownPreviewView {
         ThemeRegistry::global(cx).get(&theme_name.0).ok()
     }
 
-    /// The index of the heading that currently contains the preview's active
-    /// source position (the editor cursor), used to highlight the outline entry.
-    fn active_heading_index(&self, headings: &[MarkdownHeading]) -> Option<usize> {
-        let source_index = self.active_source_index?;
-        headings
-            .iter()
-            .rposition(|heading| heading.source_offset <= source_index)
+    /// The index of the heading for the document's currently visible section,
+    /// resolved from the preview's scroll position. When pinned, the outline
+    /// highlights this entry and tracks it as the document scrolls.
+    fn visible_heading_index(&self, cx: &App) -> Option<usize> {
+        self.markdown
+            .read(cx)
+            .heading_index_at_scroll_offset(self.scroll_handle.offset().y)
     }
 
     fn navigate_to_heading(&mut self, source_offset: usize, cx: &mut Context<Self>) {
@@ -1119,7 +1127,7 @@ impl MarkdownPreviewView {
             return None;
         }
 
-        let active_heading_index = self.active_heading_index(&headings);
+        let visible_heading_index = self.visible_heading_index(cx);
 
         let mut toggle_button = IconButton::new("markdown-preview-toc-toggle", IconName::ListTree)
             .shape(IconButtonShape::Square)
@@ -1160,7 +1168,7 @@ impl MarkdownPreviewView {
         if self.toc_hovered || self.toc_pinned {
             container = container.child(self.render_table_of_contents_panel(
                 &headings,
-                active_heading_index,
+                visible_heading_index,
                 window,
                 cx,
             ));
@@ -1172,7 +1180,7 @@ impl MarkdownPreviewView {
     fn render_table_of_contents_panel(
         &mut self,
         headings: &[MarkdownHeading],
-        active_heading_index: Option<usize>,
+        visible_heading_index: Option<usize>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1198,9 +1206,10 @@ impl MarkdownPreviewView {
             .v_flex();
 
         for (index, heading) in headings.iter().enumerate() {
-            let is_active = active_heading_index == Some(index);
+            let is_active = visible_heading_index == Some(index);
             let indent = rems(0.5 + f32::from(heading.level.saturating_sub(1)) * 0.75);
             let bar_width = heading_outline_bar_width(heading.level);
+            let bar_height = heading_outline_bar_height(heading.level);
             let source_offset = heading.source_offset;
             let text = heading.text.clone();
 
@@ -1225,7 +1234,7 @@ impl MarkdownPreviewView {
                     .child(
                         div()
                             .w(bar_width)
-                            .h(px(2.))
+                            .h(bar_height)
                             .rounded_full()
                             .bg(if is_active {
                                 active_bar_color
@@ -2123,6 +2132,7 @@ impl Render for MarkdownPreviewView {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll_handle)
                         .restrict_scroll_to_axis()
+                        .on_scroll(cx.listener(|_, _event, _window, cx| cx.notify()))
                         .p_4()
                         .child({
                             let markdown_element =
