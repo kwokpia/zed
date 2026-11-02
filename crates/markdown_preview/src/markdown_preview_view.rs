@@ -32,8 +32,8 @@ use theme::{SystemAppearance, Theme, ThemeRegistry};
 use theme_settings::ThemeSettings;
 use ui::utils::WithRemSize;
 use ui::{
-    ContextMenu, IconButtonShape, LinkPreview, ScrollAxes, Scrollbars, Tooltip, WithScrollbar,
-    prelude::*, right_click_menu,
+    ContextMenu, IconButtonShape, Indicator, LinkPreview, ScrollAxes, Scrollbars, Tooltip,
+    WithScrollbar, prelude::*, right_click_menu,
 };
 use util::{
     ResultExt,
@@ -1121,8 +1121,21 @@ impl MarkdownPreviewView {
 
         let active_heading_index = self.active_heading_index(&headings);
 
-        let toggle_button = IconButton::new("markdown-preview-toc-toggle", IconName::ListTree)
-            .shape(IconButtonShape::Square);
+        let mut toggle_button = IconButton::new("markdown-preview-toc-toggle", IconName::ListTree)
+            .shape(IconButtonShape::Square)
+            .tooltip(Tooltip::text(if self.toc_pinned {
+                "Unpin"
+            } else {
+                "Pin"
+            }))
+            .on_click(cx.listener(|this, _, _window, cx| {
+                this.toc_pinned = !this.toc_pinned;
+                cx.notify();
+            }));
+
+        if self.toc_pinned {
+            toggle_button = toggle_button.indicator(Indicator::dot().color(Color::Accent));
+        }
 
         let mut container = div()
             .id("markdown-preview-toc")
@@ -1183,38 +1196,6 @@ impl MarkdownPreviewView {
             .elevation_2(cx)
             .p_1()
             .v_flex();
-
-        panel = panel.child(
-            div()
-                .id("markdown-preview-toc-header")
-                .w_full()
-                .h_flex()
-                .justify_end()
-                .child(
-                    IconButton::new(
-                        if self.toc_pinned {
-                            "markdown-preview-toc-unpin"
-                        } else {
-                            "markdown-preview-toc-pin"
-                        },
-                        if self.toc_pinned {
-                            IconName::Unpin
-                        } else {
-                            IconName::Pin
-                        },
-                    )
-                    .shape(IconButtonShape::Square)
-                    .tooltip(Tooltip::text(if self.toc_pinned {
-                        "Unpin"
-                    } else {
-                        "Pin"
-                    }))
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.toc_pinned = !this.toc_pinned;
-                        cx.notify();
-                    })),
-                ),
-        );
 
         for (index, heading) in headings.iter().enumerate() {
             let is_active = active_heading_index == Some(index);
