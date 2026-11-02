@@ -1,8 +1,8 @@
 name: sync-upstream-and-build
 
 # Keeps the fork's `main` in sync with `zed-industries/zed` (preserving local
-# commits, e.g. the markdown TOC work) and type-checks the merged result so
-# upstream changes that break the build are caught early.
+# commits) and, when upstream has changed (or on manual dispatch), builds a
+# macOS release DMG and uploads it as an artifact.
 
 on:
   schedule:
@@ -49,7 +49,8 @@ jobs:
   build:
     needs: sync
     if: needs.sync.outputs.upstream_ahead != '0' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: macos-26
+    timeout-minutes: 360
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
@@ -57,8 +58,17 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Install Linux dependencies
-        run: ./script/linux
+      - name: Free up disk space
+        run: |
+          # Keep only the default Xcode 26.6; the standard runner only has ~14 GB
+          # free and Zed's release build needs ~20 GB.
+          sudo rm -rf /Applications/Xcode_26.0.1.app \
+                      /Applications/Xcode_26.1.1.app \
+                      /Applications/Xcode_26.2.app \
+                      /Applications/Xcode_26.3.app \
+                      /Applications/Xcode_26.4.1.app \
+                      /Applications/Xcode_26.5.app
+          df -h /
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -68,6 +78,14 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Build (type-check)
-        run: cargo check
-        timeout-minutes: 180
+      - name: Build DMG
+        run: ./script/bundle-mac
+        timeout-minutes: 360
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-macos-arm64-dmg
+          path: target/*/release/Zed-*.dmg
+          if-no-files-found: error
+          retention-days: 90
