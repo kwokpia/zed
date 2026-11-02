@@ -1123,6 +1123,7 @@ impl MarkdownPreviewView {
 
         let mut toggle_button = IconButton::new("markdown-preview-toc-toggle", IconName::ListTree)
             .shape(IconButtonShape::Square)
+            .icon_color(Color::Accent)
             .tooltip(Tooltip::text(if self.toc_pinned {
                 "Unpin"
             } else {
@@ -1134,7 +1135,9 @@ impl MarkdownPreviewView {
             }));
 
         if self.toc_pinned {
-            toggle_button = toggle_button.indicator(Indicator::dot().color(Color::Accent));
+            toggle_button = toggle_button.indicator(
+                Indicator::dot().color(Color::Accent).border_color(Color::Default),
+            );
         }
 
         let mut container = div()
